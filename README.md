@@ -8,7 +8,6 @@ The intent of this script is to take in a CSV file with 3 columns:
   - The third column is the path to the LAMBDAS file of the same output as the second column.
     - Together they should look like this:
  
-| :--- | :--- | :--- | :--- |
 | C:/ProjectGIS/Species/boomslang.trimmed.csv | C:\ProjectGIS\Models\bio12_bio4\Dispholidus_typus.asc | C:\ProjectGIS\Models\bio12_bio4\Dispholidus_typus.lambdas |
 | C:/ProjectGIS/Species/boomslang.trimmed.csv | C:\ProjectGIS\Models\bio12_bio4_X201905\Dispholidus_typus.asc | C:\ProjectGIS\Models\bio12_bio4_X201905\Dispholidus_typus.lambdas |
 | C:/ProjectGIS/Species/boomslang.trimmed.csv | C:\ProjectGIS\Models\bio12_ro1\Dispholidus_typus.asc | C:\ProjectGIS\Models\bio12_ro1\Dispholidus_typus.lambdas |
