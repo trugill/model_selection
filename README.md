@@ -21,19 +21,6 @@ Also, one of the parameters to the script is the path to the output CSV file. He
 
 Some results will look like this:
 
-```python?code_reference&code_event_index=2
-import pandas as pd
-
-# Read the CSV file into a DataFrame
-df = pd.read_csv('ModelSelection_test.csv')
-
-# Select the first 19 rows (index 0-18) of the DataFrame. The 20th line is index 19, so "before the 20th line" means rows up to index 18.
-df_truncated = df.head(19)
-
-# Format the truncated DataFrame into a markdown table and print it
-markdown_table = df_truncated.to_markdown(index=False)
-print(markdown_table)
-
 | points\_path | ascii\_file\_path | loglikelihood | parameter\_count | sample\_size | aic\_score | aicc\_score | bic\_score | probsum | valid\_points | total\_points | error\_message |
 |:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|
 | C:/ProjectGIS/Phacochoerus\_africanus/CSV/Phacochoerus\_africanus.trimmed.csv | C:\\ProjectGIS\\Phacochoerus\_africanus\\Models\\bio11\_bio17\\Phacochoerus\_africanus.asc | -24779.1 | 100 | 1955 | 49758.1 | 49769.0 | 50316.0 | 158323.0 | 1955 | 1961 | nan |
