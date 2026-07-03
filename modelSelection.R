@@ -1,441 +1,270 @@
-# Log-Likelihood Calculator for Species Distribution Models
-# This script calculates log-likelihood for each row in a CSV file
-# CSV format: column 1 = path to datapoints, column 2 = path to .asc raster, column 3 = path to .lambdas file
-
-# Required libraries
-library(raster)
-library(sp)
-
-
-
-
-
-# Function to read and validate lambdas file
-read_lambdas <- function(lambdas_path) {
-  if (!file.exists(lambdas_path)) {
-    stop(paste("Lambdas file not found:", lambdas_path))
-  }
+# -----------------------------------------------------------------------------
+# Reads a CSV and returns a list with:
+#   $header       - the header line (character)
+#   $has_species  - TRUE if first column looks like a species/name column
+#   $lat_idx      - 1-based index of the latitude column in the CSV
+#   $lon_idx      - 1-based index of the longitude column in the CSV
+#   $points       - character vector of "lon,lat" strings (or "lat,lon" - we return raw fields)
+#   $rows         - the raw data rows split into fields (list of char vectors)
+# -----------------------------------------------------------------------------
+read_points_csv <- function(infile, verbose = TRUE) {
+  lines <- readLines(infile, warn = FALSE)
+  if (length(lines) < 2) stop(sprintf("CSV has fewer than 2 lines: %s", infile))
   
-  tryCatch({
-    # Try reading with different methods to handle inconsistent formatting
-    # First try: read as lines and parse manually
-    lines <- readLines(lambdas_path)
-    lines <- lines[lines != ""]  # Remove empty lines
-    
-    # Parse each line, handling variable number of columns
-    parsed_data <- list()
-    for (i in 1:length(lines)) {
-      # Split by whitespace (tab or space)
-      parts <- unlist(strsplit(lines[i], "\\s+"))
-      if (length(parts) >= 2) {
-        parsed_data[[i]] <- parts
-      }
-    }
-    
-    # Convert to data frame, handling variable column counts
-    if (length(parsed_data) > 0) {
-      max_cols <- max(sapply(parsed_data, length))
-      # Pad shorter rows with NA
-      for (i in 1:length(parsed_data)) {
-        if (length(parsed_data[[i]]) < max_cols) {
-          parsed_data[[i]] <- c(parsed_data[[i]], rep(NA, max_cols - length(parsed_data[[i]])))
-        }
-      }
-      
-      lambdas <- do.call(rbind, lapply(parsed_data, function(x) x))
-      lambdas <- as.data.frame(lambdas, stringsAsFactors = FALSE)
-      
-      # Filter out parameters with value "0.0" in second column
-      if (ncol(lambdas) >= 2) {
-        # Convert second column to numeric for comparison
-        second_col_numeric <- suppressWarnings(as.numeric(lambdas[, 2]))
-        valid_indices <- !is.na(second_col_numeric) & second_col_numeric != 0.0
-        valid_lambdas <- lambdas[valid_indices, ]
-        return(valid_lambdas)
-      } else {
-        return(lambdas)
-      }
+  header <- trimws(lines[1])
+  header_fields <- strsplit(header, ",", fixed = TRUE)[[1]]
+  header_fields_clean <- trimws(tolower(header_fields))
+  
+  # Find lat and lon columns by name (anywhere in the CSV)
+  lat_idx <- which(grepl("^lat", header_fields_clean))[1]
+  lon_idx <- which(grepl("^lon", header_fields_clean))[1]
+  
+  # If not found by name, fall back to Maxent default (species, lon, lat)
+  if (is.na(lat_idx) || is.na(lon_idx)) {
+    if (length(header_fields) >= 3) {
+      lon_idx <- 2L; lat_idx <- 3L
+      if (verbose) message("  WARNING: lat/lon columns not found by name; ",
+                           "assuming Maxent default (col2=lon, col3=lat)")
+    } else if (length(header_fields) == 2) {
+      # Two-column file with unrecognized names: assume lat,lon
+      lat_idx <- 1L; lon_idx <- 2L
+      if (verbose) message("  WARNING: lat/lon not detected; assuming (col1=lat, col2=lon)")
     } else {
-      stop("No valid data found in lambdas file")
+      stop("Cannot determine lat/lon columns in CSV")
     }
-  }, error = function(e) {
-    # Fallback: try read.table with fill=TRUE
-    tryCatch({
-      lambdas <- read.table(lambdas_path, header = FALSE, stringsAsFactors = FALSE, 
-                            fill = TRUE, sep = "", quote = "")
-      
-      # Filter out parameters with value "0.0" in second column
-      if (ncol(lambdas) >= 2) {
-        second_col_numeric <- suppressWarnings(as.numeric(lambdas[, 2]))
-        valid_indices <- !is.na(second_col_numeric) & second_col_numeric != 0.0
-        valid_lambdas <- lambdas[valid_indices, ]
-        return(valid_lambdas)
-      } else {
-        return(lambdas)
-      }
-    }, error = function(e2) {
-      stop(paste("Could not read lambdas file:", e2$message))
-    })
-  })
-}
-
-# Function to read datapoints file
-read_datapoints <- function(datapoints_path) {
-  if (!file.exists(datapoints_path)) {
-    stop(paste("Datapoints file not found:", datapoints_path))
   }
   
-  # Read datapoints file (species, latitude, longitude)
-  datapoints <- read.csv(datapoints_path, header = FALSE, stringsAsFactors = FALSE)
+  has_species <- (length(header_fields) >= 3) &&
+    !(1 %in% c(lat_idx, lon_idx))
   
-  # Ensure we have at least 3 columns
-  if (ncol(datapoints) < 3) {
-    stop(paste("Datapoints file must have at least 3 columns (species, lat, lon):", datapoints_path))
+  # Parse data rows
+  rows <- vector("list", length(lines) - 1)
+  keep <- logical(length(lines) - 1)
+  for (i in seq_along(rows)) {
+    ln <- trimws(lines[i + 1], which = "right")
+    if (nchar(ln) == 0) { keep[i] <- FALSE; next }
+    fields <- strsplit(ln, ",", fixed = TRUE)[[1]]
+    if (length(fields) < max(lat_idx, lon_idx)) { keep[i] <- FALSE; next }
+    rows[[i]] <- trimws(fields)
+    keep[i] <- TRUE
+  }
+  rows <- rows[keep]
+  
+  if (verbose) {
+    message(sprintf("  CSV: %d columns [%s]",
+                    length(header_fields), paste(header_fields, collapse = ", ")))
+    message(sprintf("  Detected: lat_idx=%d, lon_idx=%d, has_species=%s",
+                    lat_idx, lon_idx, has_species))
+    message(sprintf("  Loaded %d data rows", length(rows)))
   }
   
-  # Name the columns for clarity
-  colnames(datapoints)[1:3] <- c("species", "latitude", "longitude")
-  
-  # Convert coordinates to numeric
-  datapoints$latitude <- as.numeric(datapoints$latitude)
-  datapoints$longitude <- as.numeric(datapoints$longitude)
-  
-  # Remove rows with NA coordinates
-  datapoints <- datapoints[!is.na(datapoints$latitude) & !is.na(datapoints$longitude), ]
-  
-  return(datapoints)
-}
-
-# Function to calculate log-likelihood for a single row
-calculate_loglikelihood <- function(datapoints_path, raster_path, lambdas_path) {
-  tryCatch({
-    # Read input files
-    cat("Reading datapoints from:", datapoints_path, "\n")
-    datapoints <- read_datapoints(datapoints_path)
-    
-    cat("Reading raster from:", raster_path, "\n")
-    if (!file.exists(raster_path)) {
-      stop(paste("Raster file not found:", raster_path))
-    }
-    prediction_raster <- raster(raster_path)
-    
-    cat("Reading lambdas from:", lambdas_path, "\n")
-    lambdas <- read_lambdas(lambdas_path)
-    
-    cat("Processing", nrow(datapoints), "datapoints\n")
-    
-    # Step 1: Calculate normalization factor (probsum)
-    cat("Calculating normalization factor...\n")
-    raster_values <- getValues(prediction_raster)
-    
-    # Remove NA values and values that might represent "No Data" (like -9999)
-    valid_values <- raster_values[!is.na(raster_values) & raster_values != -9999]
-    probsum <- sum(valid_values, na.rm = TRUE)
-    
-    cat("Normalization factor (probsum):", probsum, "\n")
-    
-    if (probsum <= 0) {
-      warning("Probsum is zero or negative, cannot calculate log-likelihood")
-      return(NA)
-    }
-    
-    # Step 2: Initialize log-likelihood
-    loglikelihood <- 0
-    valid_points <- 0
-    
-    # Step 3: Process each occurrence point
-    cat("Processing occurrence points...\n")
-    
-    xx = 0
-    
-    for (i in 1:nrow(datapoints)) {
-      lat <- datapoints$latitude[i]
-      lon <- datapoints$longitude[i]
-      
-      # Extract prediction value at this point
-      point_coords <- data.frame(x = lon, y = lat)
-      coordinates(point_coords) <- ~x + y
-      
-      # Set the same CRS as the raster
-      proj4string(point_coords) <- proj4string(prediction_raster)
-      
-      # Extract value from raster
-      layer_value <- extract(prediction_raster, point_coords)
-      
-      # Check if value is valid (greater than 0)
-      if (!is.na(layer_value) && layer_value > 0) {
-        # Calculate normalized probability
-        probability <- layer_value / probsum
-        
-        # Add log of probability to total
-        loglikelihood <- loglikelihood + log(probability)
-        valid_points <- valid_points + 1
-      }
-      
-      xx = xx + 1
-      if(xx %% 100 == 0){
-        cat(xx, " of ", nrow(datapoints), " points processed...\n")
-      }
-      
-    }
-    
-    cat("Valid points processed:", valid_points, "out of", nrow(datapoints), "\n")
-    cat("Log-likelihood:", loglikelihood, "\n\n")
-    
-    return(list(
-      loglikelihood = loglikelihood,
-      valid_points = valid_points,
-      total_points = nrow(datapoints),
-      probsum = probsum
-    ))
-    
-  }, error = function(e) {
-    cat("Error processing row:", e$message, "\n")
-    cat("Continuing to next row...\n\n")
-    return(list(
-      loglikelihood = NA,
-      valid_points = NA,
-      total_points = NA,
-      probsum = NA,
-      error = e$message
-    ))
-  })
-}
-
-# Main function to process CSV file
-process_csv_loglikelihood <- function(csv_path, output_path = NULL) {
-  if (!file.exists(csv_path)) {
-    stop("CSV file not found:", csv_path)
-  }
-  
-  # Read the CSV file
-  input_data <- read.csv(csv_path, header = FALSE, stringsAsFactors = FALSE)
-  
-  # Check that we have at least 3 columns
-  if (ncol(input_data) < 3) {
-    stop("CSV file must have at least 3 columns: datapoints_path, raster_path, lambdas_path")
-  }
-  
-  # Name the columns
-  colnames(input_data)[1:3] <- c("datapoints_path", "raster_path", "lambdas_path")
-  
-  cat("Processing", nrow(input_data), "rows from CSV file\n")
-  cat(paste(rep("=", 50), collapse = ""), "\n")
-  
-  # Initialize results data frame
-  results <- data.frame(
-    row_number = 1:nrow(input_data),
-    datapoints_path = input_data$datapoints_path,
-    raster_path = input_data$raster_path,
-    lambdas_path = input_data$lambdas_path,
-    loglikelihood = numeric(nrow(input_data)),
-    valid_points = integer(nrow(input_data)),
-    total_points = integer(nrow(input_data)),
-    probsum = numeric(nrow(input_data)),
-    error_message = character(nrow(input_data)),
-    stringsAsFactors = FALSE
+  list(
+    header      = header,
+    has_species = has_species,
+    lat_idx     = lat_idx,
+    lon_idx     = lon_idx,
+    rows        = rows
   )
-  
-  # Process each row
-  for (i in 1:nrow(input_data)) {
-    cat("Processing row", i, "of", nrow(input_data), "\n")
-    
-    result <- calculate_loglikelihood(
-      input_data$datapoints_path[i],
-      input_data$raster_path[i],
-      input_data$lambdas_path[i]
-    )
-    
-    # Store results
-    results$loglikelihood[i] <- result$loglikelihood
-    results$valid_points[i] <- ifelse(is.null(result$valid_points), NA, result$valid_points)
-    results$total_points[i] <- ifelse(is.null(result$total_points), NA, result$total_points)
-    results$probsum[i] <- ifelse(is.null(result$probsum), NA, result$probsum)
-    results$error_message[i] <- ifelse(is.null(result$error), "", result$error)
-  }
-  
-  # Save results if output path is provided
-  if (!is.null(output_path)) {
-    write.csv(results, output_path, row.names = FALSE)
-    cat("Results saved to:", output_path, "\n")
-  }
-  
-  # Print summary
-  cat("\n", paste(rep("=", 20), collapse = ""), " SUMMARY ", paste(rep("=", 20), collapse = ""), "\n")
-  cat("Total rows processed:", nrow(results), "\n")
-  cat("Successful calculations:", sum(!is.na(results$loglikelihood)), "\n")
-  cat("Failed calculations:", sum(is.na(results$loglikelihood)), "\n")
-  
-  if (sum(!is.na(results$loglikelihood)) > 0) {
-    valid_results <- results[!is.na(results$loglikelihood), ]
-    cat("Mean log-likelihood:", mean(valid_results$loglikelihood), "\n")
-    cat("Range of log-likelihood:", range(valid_results$loglikelihood), "\n")
-  }
-  
-  return(results)
 }
 
-# Function to read Maxent lambdas file and filter for active parameters
-read_lambdas <- function(lambdas_path) {
-  # 1. Basic file existence check
-  if (!file.exists(lambdas_path)) {
-    stop(paste("Lambdas file not found:", lambdas_path))
-  }
-  
-  # 2. Read the raw data from the CSV file
-  #    - header = FALSE: Maxent lambda files do not have a header row.
-  #    - stringsAsFactors = FALSE: Prevents character strings from being converted to factors,
-  #                                which is generally good practice for this type of data.
-  #    - comment.char = "": Important! Maxent lambda files can have lines starting with '#'
-  #                         or other characters if commented out. Set to "" to ensure
-  #                         all lines are read unless they are truly empty.
-  #    - fill = TRUE: Helps if some lines might have fewer columns (though less common for lambdas).
-  #    - quote = "": Prevents R from interpreting single quotes (') or backticks (`) as text delimiters,
-  #                  which can be present in feature names like 'bio4 or `1912.
-  raw_data <- read.csv(lambdas_path, header = FALSE, stringsAsFactors = FALSE, comment.char = "", quote = "", strip.white = TRUE)
-  
-  # 3. Handle potential parsing issues: Ensure the second column (coefficient) is numeric.
-  #    If there are non-numeric values, they will become NA.
-  #    Maxent lambda files usually have the coefficient in the second column (V2).
-  raw_data$V2_numeric <- as.numeric(raw_data$V2)
-  
-  # 4. Filter out metadata lines and rows where coefficient is NA (due to parsing errors)
-  #    Metadata lines are usually at the end and have specific names in the first column.
-  #    They do not represent features/parameters.
-  metadata_keywords <- c("linearPredictorNormalizer", "densityNormalizer", "numBackgroundPoints", "entropy")
-  
-  # Create a logical vector indicating if a row is a metadata row
-  is_metadata <- raw_data$V1 %in% metadata_keywords
-  
-  # Filter out metadata rows AND rows where V2_numeric is NA (i.e., non-numeric coefficients)
-  # This also implicitly handles any fully empty lines or malformed lines that lead to NA
-  filtered_data <- raw_data[!is_metadata & !is.na(raw_data$V2_numeric), ]
-  
-  # 5. Filter out features with a 0.0 coefficient
-  #    These are features that Maxent considered but did not use in the final model.
-  #    Only non-zero coefficients are typically counted as "parameters" for model complexity.
-  active_parameters <- filtered_data[filtered_data$V2_numeric != 0.0, ]
-  
-  # Return only the relevant columns if desired, or the whole filtered data frame
-  # For counting, nrow() of this data frame is what you need.
-  return(active_parameters)
-}
 
-# Function to calculate AICc from log-likelihood
-# AICc = -2 * log-likelihood + 2 * k + (2 * k * (k + 1)) / (n - k - 1)
-# where k = number of parameters, n = sample size
-calculate_aicc <- function(loglikelihood, n_parameters, sample_size) {
-  if (is.na(loglikelihood) || is.na(n_parameters) || is.na(sample_size)) {
-    return(NA)
+compute_AIC <- function(datafile, csv_info, lambdasfile, verbose = TRUE) {
+  
+  loglikelihood <- 0
+  
+  # ---- Count parameters ----
+  lambda_lines <- readLines(lambdasfile, warn = FALSE)
+  nparams <- 0
+  for (ln in lambda_lines) {
+    parts <- strsplit(ln, ",", fixed = TRUE)[[1]]
+    if (length(parts) < 2) next
+    weight <- sub("\\s+", "", parts[2])
+    if (!identical(weight, "0.0")) nparams <- nparams + 1
   }
+  nparams <- nparams - 4
   
-  if (sample_size <= n_parameters + 1) {
-    warning("Sample size too small for AICc calculation (n <= k + 1)")
-    return(NA)
-  }
+  # ---- Parse ASCII raster ----
+  asc_lines <- readLines(datafile, warn = FALSE)
+  fileparams <- list()
+  data_lines <- character(0)
   
-  aic <- -2 * loglikelihood + 2 * n_parameters
-  aicc_correction <- (2 * n_parameters * (n_parameters + 1)) / (sample_size - n_parameters - 1)
-  aicc <- aic + aicc_correction
-  
-  return(aicc)
-}
-
-# Function to add AICc calculations to existing results
-calculate_aicc_from_results <- function(results) {
-  cat("Calculating AICc values for", nrow(results), "models...\n")
-  
-  # Add new columns
-  results$n_parameters <- numeric(nrow(results))
-  results$aic <- numeric(nrow(results))
-  results$aicc <- numeric(nrow(results))
-  
-  for (i in 1:nrow(results)) {
-    if (!is.na(results$loglikelihood[i])) {
-      # Count parameters from lambdas file
-      n_params <- count_parameters(results$lambdas_path[i])
-      results$n_parameters[i] <- ifelse(is.na(n_params), NA, n_params)
-      
-      # Calculate AIC
-      if (!is.na(n_params)) {
-        results$aic[i] <- -2 * results$loglikelihood[i] + 2 * n_params
-        
-        # Calculate AICc using valid_points as sample size
-        results$aicc[i] <- calculate_aicc(
-          results$loglikelihood[i], 
-          n_params, 
-          results$valid_points[i]
-        )
-      } else {
-        results$aic[i] <- NA
-        results$aicc[i] <- NA
-      }
+  for (ln in asc_lines) {
+    if (grepl("^\\s*[0-9-]", ln)) {
+      data_lines <- c(data_lines, trimws(ln, which = "right"))
     } else {
-      results$n_parameters[i] <- NA
-      results$aic[i] <- NA
-      results$aicc[i] <- NA
-    }
-  }
-  
-  return(results)
-}
-
-# Enhanced main function that includes AICc calculations
-process_csv_loglikelihood_with_aicc <- function(csv_path, output_path = NULL) {
-  # First calculate log-likelihoods
-  results <- process_csv_loglikelihood(csv_path, output_path = NULL)
-  
-  # Then add AICc calculations
-  results_with_aicc <- calculate_aicc_from_results(results)
-  
-  # Save enhanced results if output path is provided
-  if (!is.null(output_path)) {
-    write.csv(results_with_aicc, output_path, row.names = FALSE)
-    cat("Results with AICc saved to:", output_path, "\n")
-  }
-  
-  # Print enhanced summary
-  cat("\n", paste(rep("=", 15), collapse = ""), " ENHANCED SUMMARY ", paste(rep("=", 15), collapse = ""), "\n")
-  cat("Total rows processed:", nrow(results_with_aicc), "\n")
-  cat("Successful calculations:", sum(!is.na(results_with_aicc$loglikelihood)), "\n")
-  cat("Failed calculations:", sum(is.na(results_with_aicc$loglikelihood)), "\n")
-  
-  if (sum(!is.na(results_with_aicc$loglikelihood)) > 0) {
-    valid_results <- results_with_aicc[!is.na(results_with_aicc$loglikelihood), ]
-    cat("Mean log-likelihood:", round(mean(valid_results$loglikelihood), 4), "\n")
-    cat("Range of log-likelihood:", round(range(valid_results$loglikelihood), 4), "\n")
-    
-    if (sum(!is.na(valid_results$n_parameters)) > 0) {
-      valid_params <- valid_results[!is.na(valid_results$n_parameters), ]
-      cat("Mean number of parameters:", round(mean(valid_params$n_parameters), 2), "\n")
-      cat("Range of parameters:", range(valid_params$n_parameters), "\n")
-      
-      if (sum(!is.na(valid_params$aicc)) > 0) {
-        valid_aicc <- valid_params[!is.na(valid_params$aicc), ]
-        cat("Mean AICc:", round(mean(valid_aicc$aicc), 4), "\n")
-        cat("Range of AICc:", round(range(valid_aicc$aicc), 4), "\n")
-        
-        # Find best model (lowest AICc)
-        best_model_idx <- which.min(valid_aicc$aicc)
-        cat("\nBest model (lowest AICc):\n")
-        cat("Row:", valid_aicc$row_number[best_model_idx], "\n")
-        cat("AICc:", round(valid_aicc$aicc[best_model_idx], 4), "\n")
-        cat("Parameters:", valid_aicc$n_parameters[best_model_idx], "\n")
-        cat("Log-likelihood:", round(valid_aicc$loglikelihood[best_model_idx], 4), "\n")
+      parts <- strsplit(trimws(ln), "\\s+")[[1]]
+      if (length(parts) >= 2) {
+        fileparams[[tolower(parts[1])]] <- parts[2]
       }
     }
   }
   
-  return(results_with_aicc)
+  xll      <- as.numeric(fileparams[["xllcorner"]])
+  yll      <- as.numeric(fileparams[["yllcorner"]])
+  cellsize <- as.numeric(fileparams[["cellsize"]])
+  ncols    <- as.integer(fileparams[["ncols"]])
+  nrows    <- as.integer(fileparams[["nrows"]])
+  
+  if (verbose) {
+    message(sprintf("  Raster geometry: xll=%g, yll=%g, cellsize=%g, ncols=%s, nrows=%s",
+                    xll, yll, cellsize,
+                    ifelse(is.na(ncols), "?", ncols),
+                    ifelse(is.na(nrows), "?", nrows)))
+    message(sprintf("  Data rows found: %d", length(data_lines)))
+  }
+  
+  # Row 0 = bottom of map
+  env_data <- rev(data_lines)
+  
+  # Pre-split every raster row for efficiency (huge speedup vs. splitting per point)
+  env_cells <- lapply(env_data, function(r) {
+    v <- strsplit(r, "\\s+")[[1]]
+    suppressWarnings(as.numeric(v[v != ""]))
+  })
+  
+  # Compute probsum in one pass
+  probsum <- sum(sapply(env_cells, function(v) {
+    ok <- !is.na(v) & v != -9999
+    sum(v[ok])
+  }))
+  if (verbose) message(sprintf("  probsum = %g", probsum))
+  
+  # ---- Compute log-likelihood ----
+  npoints <- 0
+  points_processed <- 0
+  points_out_of_bounds <- 0
+  points_no_data <- 0
+  
+  for (fields in csv_info$rows) {
+    points_processed <- points_processed + 1
+    
+    thisx <- suppressWarnings(as.numeric(fields[csv_info$lon_idx]))
+    thisy <- suppressWarnings(as.numeric(fields[csv_info$lat_idx]))
+    
+    if (is.na(thisx) || is.na(thisy)) {
+      if (verbose && points_processed <= 5) {
+        message(sprintf("  Point %d: non-numeric coords in [%s]",
+                        points_processed, paste(fields, collapse = ",")))
+      }
+      next
+    }
+    
+    if (verbose && points_processed <= 3) {
+      message(sprintf("  Point %d: x(lon)=%g, y(lat)=%g",
+                      points_processed, thisx, thisy))
+    }
+    
+    row <- as.integer(floor((thisy - yll) / cellsize))
+    col <- as.integer(floor((thisx - xll) / cellsize))
+    
+    if (verbose && points_processed <= 3) {
+      message(sprintf("    -> row=%d, col=%d (env rows: %d)",
+                      row, col, length(env_cells)))
+    }
+    
+    if (row < 0 || row >= length(env_cells)) {
+      points_out_of_bounds <- points_out_of_bounds + 1
+      next
+    }
+    cells <- env_cells[[row + 1]]
+    if (col < 0 || col >= length(cells)) {
+      points_out_of_bounds <- points_out_of_bounds + 1
+      next
+    }
+    
+    layer_value <- cells[col + 1]
+    
+    if (!is.na(layer_value) && layer_value > 0) {
+      loglikelihood <- loglikelihood + log(layer_value / probsum)
+      npoints <- npoints + 1
+    } else {
+      points_no_data <- points_no_data + 1
+    }
+  }
+  
+  if (verbose) {
+    message(sprintf("  === Summary: processed=%d, matched=%d, out-of-bounds=%d, no-data/zero=%d ===",
+                    points_processed, npoints, points_out_of_bounds, points_no_data))
+  }
+  
+  if (nparams >= npoints - 1) {
+    AICscore  <- "x"; AICcscore <- "x"; BICscore  <- "x"
+  } else {
+    AICscore  <- 2 * nparams - 2 * loglikelihood
+    AICcscore <- AICscore + (2 * nparams * (nparams + 1) / (npoints - nparams - 1))
+    BICscore  <- nparams * log(npoints) - 2 * loglikelihood
+  }
+  
+  list(
+    loglikelihood = loglikelihood,
+    nparams       = nparams,
+    npoints       = npoints,
+    AIC           = AICscore,
+    AICc          = AICcscore,
+    BIC           = BICscore
+  )
 }
 
 
-# Example usage:
-# results <- process_csv_loglikelihood_with_aicc("input_file.csv", "output_results.csv")
+modsel_extract_data <- function(ascfile, csv_info, lambdasfile, outcon,
+                                csvfile_label, verbose = TRUE) {
+  message(sprintf("\nExtracting data from %s using %s...", ascfile, csvfile_label))
+  res <- compute_AIC(ascfile, csv_info, lambdasfile, verbose = verbose)
+  outline <- paste(
+    csvfile_label, ascfile,
+    res$loglikelihood, res$nparams, res$npoints,
+    res$AIC, res$AICc, res$BIC,
+    sep = ","
+  )
+  writeLines(outline, con = outcon)
+}
 
-# For processing a single row (testing):
-# single_result <- calculate_loglikelihood(
-#   "path/to/datapoints.csv",
-#   "path/to/prediction.asc", 
-#   "path/to/lambdas.txt"
-# )
+
+modsel_execute <- function(modselfile, verbose = TRUE) {
+  if (!file.exists(modselfile)) stop(sprintf("Control file not found: %s", modselfile))
+  outfile <- sub("\\.csv$", "_model_selection.csv", modselfile, ignore.case = TRUE)
+  if (identical(outfile, modselfile)) outfile <- paste0(modselfile, "_model_selection.csv")
+  outcon <- file(outfile, open = "w")
+  on.exit(close(outcon), add = TRUE)
+  writeLines(
+    "Points,ASCII file,Log Likelihood,Parameters,Sample Size,AIC score,AICc score,BIC score",
+    con = outcon
+  )
+  control_lines <- readLines(modselfile, warn = FALSE)
+  
+  # Cache parsed CSVs so we don't re-parse the same points file for every model
+  csv_cache <- list()
+  
+  for (raw in control_lines) {
+    line <- trimws(raw, which = "right")
+    line <- gsub("\"", "", line, fixed = TRUE)
+    if (nchar(line) == 0) next
+    fields <- strsplit(line, ",", fixed = TRUE)[[1]]
+    if (length(fields) < 3) { message(sprintf("Skipping malformed line: %s", raw)); next }
+    points_csv   <- fields[1]
+    ascii_file   <- fields[2]
+    lambdas_file <- fields[3]
+    
+    ready_to_go <- TRUE
+    if (!file.exists(points_csv))   { message(sprintf("Can't find %s!", points_csv));   ready_to_go <- FALSE }
+    if (!file.exists(ascii_file))   { message(sprintf("Can't find %s!", ascii_file));   ready_to_go <- FALSE }
+    if (!file.exists(lambdas_file)) { message(sprintf("Can't find %s!", lambdas_file)); ready_to_go <- FALSE }
+    
+    if (ready_to_go) {
+      if (is.null(csv_cache[[points_csv]])) {
+        csv_cache[[points_csv]] <- read_points_csv(points_csv, verbose = verbose)
+      }
+      modsel_extract_data(ascii_file, csv_cache[[points_csv]], lambdas_file,
+                          outcon, csvfile_label = points_csv, verbose = verbose)
+    }
+  }
+  message("\nFinished!")
+  invisible(outfile)
+}
+
+# Read the README.md! 
+# TO RUN:
+# modsel_execute("Path/To/Your/CSV.csv")
+
+modsel_execute("C:/NewProjectGISTemp/Phacochoerus_africanus/CSV/modelSelection.csv")
+
